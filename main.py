@@ -79,17 +79,14 @@ def create_gradio_interface():
             current_prompt_display = gr.Markdown(label="Current Prompt") # Added display for the current prompt
             with gr.Column():
                 source_display = gr.Dataframe(
-                    headers=["Text ID", "Source Text", "Extra Data", "Translated Text", "Translation ID", "Raw Response"],
+                    headers=["Text ID", "Source Text", "Extra Data", "Translated Text", "Details", "Translation ID", "Raw Response"],
                     label="Source Texts",
                     wrap=True,
                     interactive=False,
                     type="pandas",
                     row_count=(1, "dynamic"),
-                    col_count=(6, "fixed")  # Adjusted col_count
+                    col_count=(7, "fixed")
                 )
-                with gr.Row():
-                    prev_page_button = gr.Button("Previous Page", interactive=False)
-                    next_page_button = gr.Button("Next Page")
                 translate_all_button = gr.Button("Translate All")
 
             #translated_text = gr.Textbox(label="Translated Text", lines=5) # Display translation, removed for now
@@ -223,7 +220,7 @@ def create_gradio_interface():
                 texts = get_session_texts(db, session_id)
                 data = []
                 for text in texts:
-                  data.append([text.text_id, text.source_text, text.extra_data, "", gr.Button("Show Details")])
+                    data.append([text.text_id, text.source_text, text.extra_data, gr.Button("Show Details"), text.translation_id if hasattr(text, "translation_id") else "", ""])
 
                 return gr.update(value=data)
             finally:
@@ -400,6 +397,7 @@ def create_gradio_interface():
                         text.source_text,
                         text.extra_data,
                         translated_text,
+                        gr.Button("Show Details"),
                         text.translation_id if hasattr(text, 'translation_id') else "",  # Keep translation ID for evaluation
                         json.dumps(response, indent=2) if response else "No response" # Store the raw response
                     ])
@@ -428,38 +426,7 @@ def create_gradio_interface():
             finally:
                 db.close()
 
-        def load_session_texts(session_info_str: str, page_number: int = 1):
-            if not session_info_str:
-                return gr.update(value=[]), gr.update(interactive=False), gr.update(interactive=True)
-
-            try:
-                session_id = int(session_info_str.split(" ")[1]) # Extract session ID
-            except (ValueError, IndexError):
-                return gr.update(value=[]), gr.update(interactive=False), gr.update(interactive=True)
-
-            db = SessionLocal()
-            try:
-                offset = (page_number - 1) * 100
-                texts = get_session_texts(db, session_id, offset=offset, limit=100)
-                data = []
-                for text in texts:
-                    data.append([text.text_id, text.source_text, text.extra_data, "", text.translation_id if hasattr(text, "translation_id") else ""])
-
-                has_prev_page = page_number > 1
-                has_next_page = len(texts) == 100
-
-                return gr.update(value=data), gr.update(interactive=has_prev_page), gr.update(interactive=has_next_page)
-            finally:
-                db.close()
-
-        def go_to_previous_page(page_number: int):
-            return max(1, page_number - 1)
-
-        def go_to_next_page(page_number: int):
-            return page_number + 1
-
         translation_id_state = gr.State(-1)
-        page_number_state = gr.State(1)
 
         def show_request_response(project_name, language_code, prompt_version, data: gr.SelectData):
             if not all([project_name, language_code, prompt_version]):
@@ -474,7 +441,7 @@ def create_gradio_interface():
             try:
                 prompt = get_prompt_by_version_string(db, project_name, language_code, prompt_version)
                 if prompt:
-                    # Extract translated text and translation ID from the selected row
+                    # Extract translated text, raw response and translation ID from the selected row
                     if data.index[1] == 3:
                         translated_text = data.value
                     elif data.index[1] == 6:
@@ -483,7 +450,6 @@ def create_gradio_interface():
                         translated_text = "Translation ID selected"
                     else:
                         translated_text = "No translation available."
-
 
                     translation_id = data.value if data.index[1] == 5 else -1
                     raw_response = data.value if data.index[1] == 6 else "No raw response"
@@ -518,28 +484,10 @@ def create_gradio_interface():
 
         session_dropdown.change(
             load_session_texts,
-            inputs=[session_dropdown, page_number_state],
-            outputs=[source_display, prev_page_button, next_page_button]
+            inputs=[session_dropdown],
+            outputs=[source_display]
         )
-
-        prev_page_button.click(
-            go_to_previous_page,
-            inputs=[page_number_state],
-            outputs=[page_number_state]
-        )
-
-        next_page_button.click(
-            go_to_next_page,
-            inputs=[page_number_state],
-            outputs=[page_number_state]
-        )
-
-        page_number_state.change(
-            load_session_texts,
-            inputs=[session_dropdown, page_number_state],
-            outputs=[source_display, prev_page_button, next_page_button]
-        )
-        
+      
         save_evaluation_button.click(
             handle_save_evaluation,
             inputs=[session_dropdown, overall_score_input, comments_input, translation_id_state],
