@@ -79,13 +79,13 @@ def create_gradio_interface():
             current_prompt_display = gr.Markdown(label="Current Prompt") # Added display for the current prompt
             with gr.Column():
                 source_display = gr.Dataframe(
-                    headers=["Text ID", "Source Text", "Extra Data", "Translated Text", "Details", "Translation ID", "Raw Response"],
+                    headers=["Text ID", "Source Text", "Extra Data", "Translated Text", "Details", "Translation ID"],
                     label="Source Texts",
                     wrap=True,
                     interactive=False,
                     type="pandas",
                     row_count=(1, "dynamic"),
-                    col_count=(7, "fixed")
+                    col_count=(6, "fixed")
                 )
                 translate_all_button = gr.Button("Translate All")
 
@@ -220,7 +220,7 @@ def create_gradio_interface():
                 texts = get_session_texts(db, session_id)
                 data = []
                 for text in texts:
-                    data.append([text.text_id, text.source_text, text.extra_data, gr.Button("Show Details"), text.translation_id if hasattr(text, "translation_id") else "", ""])
+                    data.append([text.text_id, text.source_text, text.extra_data, "", "Details", text.translation_id if hasattr(text, "translation_id") else ""])
 
                 return gr.update(value=data)
             finally:
@@ -385,7 +385,15 @@ def create_gradio_interface():
                             "EN",  # Source language is English
                             language_code  # Target language from dropdown
                         )
-                        translated_text = response["translated_text"]
+                        # Save translation to database
+                        translation = Translation(
+                            session_text_id=text.id,
+                            prompt_id=prompt.id,
+                            translated_text=response["translated_text"],
+                            metrics={}  # We'll store other metrics here if needed in the future
+                        )
+                        db.add(translation)
+                        db.commit()
                     except Exception as e:
                         print(f"Translation error: {str(e)}")
                         translated_text = f"Error: {str(e)}"
@@ -396,10 +404,9 @@ def create_gradio_interface():
                         text.text_id,
                         text.source_text,
                         text.extra_data,
-                        translated_text,
-                        gr.Button("Show Details"),
-                        text.translation_id if hasattr(text, 'translation_id') else "",  # Keep translation ID for evaluation
-                        json.dumps(response, indent=2) if response else "No response" # Store the raw response
+                        response["translated_text"] if response else "Error: Translation failed",
+                        "Details",
+                        translation.id if 'translation' in locals() else ""
                     ])
 
                 return gr.update(value=data), gr.update(interactive=True)
@@ -428,7 +435,24 @@ def create_gradio_interface():
 
         translation_id_state = gr.State(-1)
 
-        def show_request_response(project_name, language_code, prompt_version, data: gr.SelectData):
+        def show_request_response(project_name, language_code, prompt_version, session_info_str, data: gr.SelectData):
+            if not session_info_str:
+                return [
+                    gr.update(value="No session selected", visible=True),
+                    gr.update(value="No session selected", visible=True),
+                    gr.update(visible=True),
+                    -1
+                ]
+            
+            try:
+                session_id = int(session_info_str.split(" ")[1])
+            except (ValueError, IndexError):
+                return [
+                    gr.update(value="Invalid session information", visible=True),
+                    gr.update(value="Invalid session information", visible=True),
+                    gr.update(visible=True),
+                    -1
+                ]
             if not all([project_name, language_code, prompt_version]):
                 return [
                     gr.update(value="", visible=True),
@@ -441,22 +465,78 @@ def create_gradio_interface():
             try:
                 prompt = get_prompt_by_version_string(db, project_name, language_code, prompt_version)
                 if prompt:
-                    # Extract translated text, raw response and translation ID from the selected row
-                    if data.index[1] == 3:
-                        translated_text = data.value
-                    elif data.index[1] == 6:
-                        translated_text = "Raw Response selected" # Placeholder
-                    elif data.index[1] == 5:
-                        translated_text = "Translation ID selected"
-                    else:
-                        translated_text = "No translation available."
+                    # Get the row data from the source display using indices
+                    try:
+                        row_idx = data.index[0]  # Get the row index from the click event
+                        texts = get_session_texts(db, session_id)  # Get all texts for the current session
+                        text = texts[row_idx]  # Get the specific text that was clicked
+                        
+                        text_id = text.text_id
+                        source_text = text.source_text
+                        
+                        # Get the translation record from the database
+                        translation = db.query(Translation)\
+                            .filter(Translation.session_text_id == text.id)\
+                            .order_by(Translation.timestamp.desc())\
+                            .first()
+                        
+                        # Even if no translation is found, we'll still show the request
+                        translated_text = translation.translated_text if translation else None
+                        translation_id = translation.id if translation else -1
+                    except Exception as e:
+                        print(f"Error accessing row data: {str(e)}")
+                        return [
+                            gr.update(value="Error accessing data", visible=True),
+                            gr.update(value="Error accessing data", visible=True),
+                            gr.update(visible=True),
+                            -1
+                        ]
 
-                    translation_id = data.value if data.index[1] == 5 else -1
-                    raw_response = data.value if data.index[1] == 6 else "No raw response"
+                    # Format the complete prompt with the source text
+                    complete_prompt = prompt.prompt_text
+                    if source_text:
+                        if "{text}" in complete_prompt:
+                            complete_prompt = complete_prompt.replace("{text}", source_text)
+                        else:
+                            complete_prompt = f"{complete_prompt}\n\nText to translate: {source_text}"
+
+                    # Format the request JSON as it's sent to the model
+                    request_json = {
+                        "model": "claude-3-5-sonnet-20241022",
+                        "max_tokens": 1024,
+                        "messages": [
+                            {"role": "user", "content": complete_prompt}
+                        ]
+                    }
+                    
+                    # Format the response data based on whether translation exists
+                    if translation:
+                        # Ensure proper encoding of translated text
+                        response_data = {
+                            "translated_text": translation.translated_text,
+                            "model": "claude-3-5-sonnet-20241022",
+                            "timestamp": translation.timestamp.isoformat(),
+                            "metrics": translation.metrics if translation.metrics else {},
+                            "translation_id": translation.id
+                        }
+                    else:
+                        response_data = {
+                            "message": "No translation found for this text",
+                            "timestamp": datetime.now().isoformat()
+                        }
+
+                    # Convert response data to JSON with ensure_ascii=False to properly handle non-ASCII characters
+                    response_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+                    return [
+                        gr.update(value=json.dumps(request_json, indent=2), visible=True),
+                        gr.update(value=response_json, visible=True),
+                        gr.update(visible=True),
+                        translation_id
+                    ]
 
                     return [
-                        gr.update(value=prompt.prompt_text, visible=True), # this is the request
-                        gr.update(value=json.dumps(raw_response, indent=2) if raw_response else "No response", visible=True), # this is the response
+                        gr.update(value=json.dumps(request_json, indent=2), visible=True),  # Show the complete request JSON
+                        gr.update(value=json.dumps(response_data, indent=2), visible=True),  # Show the response with actual translation
                         gr.update(visible=True),
                         translation_id
                     ]
@@ -478,7 +558,7 @@ def create_gradio_interface():
 
         source_display.select(
             show_request_response,
-            inputs=[project_dropdown, language_dropdown, prompt_version_dropdown],
+            inputs=[project_dropdown, language_dropdown, prompt_version_dropdown, session_dropdown],
             outputs=[request_textbox, response_textbox, request_response_accordion, translation_id_state]
         )
 
