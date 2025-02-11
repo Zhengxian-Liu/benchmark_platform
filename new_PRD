@@ -1,0 +1,448 @@
+# Prompt Management and Evaluation Tool for Machine Translation
+
+## Table of Contents
+1. [Product Overview](#product-overview)
+2. [Background and Objectives](#background-and-objectives)
+3. [User Stories and Use Cases](#user-stories-and-use-cases)
+4. [Functional Requirements](#functional-requirements)
+5. [Non-Functional Requirements](#non-functional-requirements)
+6. [System Architecture and Data Model](#system-architecture-and-data-model)
+   - [Database Schema (SQLite)](#database-schema-sqlite)
+   - [API Endpoints](#api-endpoints)
+   - [Frontend UI Design](#frontend-ui-design)
+7. [Detailed Specification](#detailed-specification)
+   - [Prompt Management Module](#prompt-management-module)
+   - [Evaluation Engine](#evaluation-engine)
+   - [Workflow Automation & Asynchronous Updates](#workflow-automation--asynchronous-updates)
+8. [Implementation Plan and Timeline](#implementation-plan-and-timeline)
+9. [Testing, Deployment, and Future Scalability](#testing-deployment-and-future-scalability)
+10. [Risks, Dependencies, and Assumptions](#risks-dependencies-and-assumptions)
+11. [Optimizations for MVP](#optimizations-for-mvp)
+12. [Appendices and Glossary](#appendices-and-glossary)
+
+---
+
+## 1. Product Overview
+
+**Name:** Prompt Management and Evaluation Tool for Machine Translation  
+**Purpose:** A web-based, standalone tool to manage, version, and evaluate prompts used for machine translation (MT). The system enables project managers (PMs) to upload source files and style-guide details, automatically compile prompts (with both direct and indexed parameters), call the LLM/MT API to generate translations, and allow language teams to review outputs and record both automated metrics (BLEU, edit distance) and human evaluations.
+
+---
+
+## 2. Background and Objectives
+
+### Background
+- **Need:** As MT quality evaluation grows in complexity, a tool is needed that:
+  - Manages prompt templates with versioning and metadata.
+  - Integrates automated evaluation (BLEU, edit distance) with human feedback.
+  - Uses style guides to dynamically populate prompt parameters based on extra metadata (e.g., character names).
+- **Current State:** Existing solutions are either ad hoc (hard-coded prompts) or lack an integrated dashboard for prompt versioning, MT output, and evaluator feedback.
+
+### Objectives
+- Provide a single source of truth for prompt templates, versioned and linked to evaluation sessions.
+- Enable PMs to create evaluation sessions by uploading source files with necessary metadata.
+- Automatically compile prompts using the current active prompt version and style guides.
+- Record automated evaluation metrics and facilitate asynchronous human evaluations.
+- Display a hierarchical navigation panel for Projects, Sessions, Languages, and individual prompt evaluations.
+- Store all data and configuration (including LLM model info and API call metrics) in SQLite for a standalone, easy-to-deploy MVP.
+
+---
+
+## 3. User Stories and Use Cases
+
+### User Stories
+
+- **As a Project Manager (PM):**
+  - I want to create a new project and evaluation session by uploading a source file that contains TextID, source text, extra metadata, and ground truth translations.
+  - I want to review overall project metrics (e.g., total languages evaluated, active sessions) in a dashboard.
+  - I want to manage prompt versions so that every change is recorded and previous versions can be referenced or rolled back.
+
+- **As a Language Evaluator (Internal Team Member):**
+  - I want to view a language-specific dashboard that shows the source text, compiled prompt (with style guide indexing), MT output, and associated evaluation metrics.
+  - I want to enter or update human evaluation scores and comments asynchronously.
+  - I want to compare automated metrics (BLEU and edit distance) with the human evaluations.
+
+### Use Cases
+
+- **UC1: Project & Session Creation:**  
+  PM uploads a source file with columns (TextID, Source Text, Extra, Historical Translation) to create a new evaluation session.
+  
+- **UC2: Prompt Compilation and MT Generation:**  
+  The system retrieves the current active prompt version and style guide data, compiles the prompt, calls the LLM API, and records the MT output along with model configuration and API metrics.
+
+- **UC3: Evaluation Submission:**  
+  A language evaluator reviews the MT output, sees the automated metrics, and inputs human evaluation scores and comments.
+
+- **UC4: Prompt Version Management:**  
+  When a prompt is edited, a new version is created with metadata (version number, timestamp, change log, author) and becomes active for future evaluations.
+
+- **UC5: Hierarchical Navigation:**  
+  Users navigate via a left panel through Projects → Sessions → Languages → Prompts to view dashboards and detailed evaluation records.
+
+---
+
+## 4. Functional Requirements
+
+1. **Project & Session Management**
+   - Create, edit, and delete projects.
+   - Enable PMs to initiate evaluation sessions by uploading a source file.
+   - Store and display session-level metrics (e.g., number of languages, evaluation progress).
+
+2. **File Upload and Parsing**
+   - Accept a source file with columns: TextID, Source Text, Extra, Ground Truth.
+   - Validate file format and data integrity.
+
+3. **Prompt Versioning**
+   - Store prompt templates with a linear version history.
+   - Each version must include metadata: version number, timestamp, change log, and author.
+   - Support rollback to previous versions.
+
+4. **Prompt Compilation**
+   - Retrieve the active prompt version.
+   - Replace direct parameters (e.g., `{target_language}`, `{source_to_translate}`) and indexed parameters.
+   - **Indexed Parameter Processing:** Extract character names from the “Extra” column and query the language-specific style guide for additional parameters (e.g., gender, occupation, tone).
+
+5. **MT API Integration**
+   - Automatically call the LLM/MT API with the compiled prompt.
+   - Record API call metrics (latency, cost, model configuration) in the session record.
+   - Save the MT output linked to the evaluation session.
+
+6. **Automated Evaluation Metrics**
+   - Compute BLEU score by comparing the MT output with the ground truth.
+   - Compute edit distance (e.g., Levenshtein distance).
+   - Store computed scores in the evaluation record.
+
+7. **Human Evaluation Interface**
+   - Provide a web-based workbench to view source text, MT output, and automated metrics.
+   - Allow input of human evaluation scores (numeric) and comments (free-text).
+   - Support asynchronous updates to evaluation records.
+
+8. **Navigation and Reporting**
+   - **Hierarchical Navigation Format:**
+     - **Project Dashboard:**  
+       - Shows overall project metrics (total languages tested, ongoing tests, etc.) and serves as the entry point for initiating evaluation sessions.
+     - **Within a Project:**
+       - **Session List:** Each session (e.g., Session A) is listed.
+       - **Within a Session:**
+         - **Language Dashboard:** For each language (e.g., Language A, Language B), a dashboard displays the source file details, style guide management options, and evaluation progress.
+         - **Under Each Language:**  
+           - **Prompt Evaluations:**  
+             - **Prompt A (Ongoing):** The evaluation workbench for new translations.
+             - **Prompt B (Production):** A view showing finalized evaluation results.
+     - **Project Navigation Example:**  
+       ```
+       Project A
+       ├─ Session A
+       │   ├─ Language A
+       │   │   ├─ Prompt A (Ongoing Evaluation)
+       │   │   └─ Prompt B (Production Evaluation)
+       │   └─ Language B
+       └─ Project B
+       ```
+   - Generate reports and dashboards summarizing evaluation progress and performance trends.
+
+9. **Model Configuration Management**
+   - Store LLM model configuration details (model name, version, API key reference, etc.) per evaluation session.
+   - Link model configuration with API call metrics.
+
+---
+
+## 5. Non-Functional Requirements
+
+- **Scalability:**  
+  Modular architecture designed as an MVP using SQLite, with future migration to PostgreSQL or another RDBMS if needed.
+
+- **Usability:**  
+  The UI must be intuitive and include clear internal instructions.
+
+- **Performance:**  
+  API calls should be asynchronous; simple polling (for MVP) is acceptable for dashboard updates.
+
+- **Maintainability:**  
+  Code must be modular with clear separation between frontend, backend, and database layers. Include detailed inline comments and documentation.
+
+- **Security:**  
+  Implement basic security practices (e.g., secure API key storage, HTTPS for the web interface if deployed externally).
+
+- **Portability:**  
+  The tool should be deployable as a standalone web application using SQLite without extensive configuration.
+
+---
+
+## 6. System Architecture and Data Model
+
+### Database Schema (SQLite)
+
+**Projects Table**
+- `project_id` (PK)
+- `project_name`
+- `created_at`
+- `updated_at`
+- `description` (optional)
+
+**Sessions Table**
+- `session_id` (PK)
+- `project_id` (FK)
+- `session_name`
+- `model_config` (JSON string containing model name, version, API key reference, etc.)
+- `api_metrics` (JSON: latency, cost, etc.)
+- `created_at`
+- `status` (active, completed)
+
+**LanguageEvaluations Table**
+- `evaluation_id` (PK)
+- `session_id` (FK)
+- `language`
+- `source_file_path` (or reference)
+- `style_guide_id` (optional, reference to style guide data)
+- `compiled_prompt` (text)
+- `mt_output` (text)
+- `bleu_score` (numeric)
+- `edit_distance` (numeric)
+- `created_at`
+- `updated_at`
+
+**PromptVersions Table**
+- `prompt_version_id` (PK)
+- `prompt_name`
+- `version_number` (e.g., 1.0, 1.1, etc.)
+- `prompt_template` (text)
+- `change_log` (text)
+- `author`
+- `created_at`
+- `active` (boolean)
+
+**EvaluationRecords Table**
+- `record_id` (PK)
+- `evaluation_id` (FK)
+- `human_score` (numeric)
+- `human_comment` (text)
+- `updated_at`
+- `submitted_by` (optional)
+
+### API Endpoints
+
+**Projects:**
+- `GET /api/projects` – List all projects.
+- `POST /api/projects` – Create a new project.
+- `PUT /api/projects/{id}` – Update a project.
+- `DELETE /api/projects/{id}` – Delete a project.
+
+**Sessions:**
+- `POST /api/sessions` – Create a new session (including file upload).
+- `GET /api/sessions/{session_id}` – Get session details (including model config and API metrics).
+
+**Language Evaluations:**
+- `POST /api/evaluations` – Create a new language evaluation record.
+- `GET /api/evaluations/{evaluation_id}` – Retrieve an evaluation record.
+- `PUT /api/evaluations/{evaluation_id}` – Update evaluation with human scores/comments.
+
+**Prompt Versions:**
+- `GET /api/prompts` – List all prompt versions.
+- `POST /api/prompts` – Create a new prompt version (automatically increment version number).
+- `PUT /api/prompts/{prompt_version_id}` – Update prompt version details (e.g., rollback or reactivation).
+
+**MT API Call Logging:**
+- `POST /api/mt-calls` – Record an MT API call with model info and performance metrics.
+
+### Frontend UI Design
+
+- **Navigation Panel Specification:**
+  - **Hierarchy Layout:**  
+    The left-side navigation panel displays the following hierarchical structure:
+    - **Project Level:**  
+      - Displays a list of projects. Selecting a project opens the Project Dashboard, which includes overall metrics (total languages tested, ongoing evaluations) and an option for the PM to initiate a new evaluation session.
+    - **Session Level:**  
+      - Under each project, a list of sessions is shown (e.g., Session A). Each session dashboard summarizes session-specific details such as model configuration and API metrics.
+    - **Language Level:**  
+      - Within each session, the languages being evaluated are listed (e.g., Language A, Language B). Each language dashboard shows source file details, style guide management options, and evaluation progress.
+    - **Prompt Evaluation Level:**  
+      - For each language, two subviews are provided:
+        - **Prompt A (Ongoing Evaluation):** The active workbench where new translations are being generated and evaluated.
+        - **Prompt B (Production Evaluation):** A view displaying finalized evaluation results and historical data.
+  - **Example Navigation:**
+    ```
+    Project A
+    ├─ Session A
+    │   ├─ Language A
+    │   │   ├─ Prompt A (Ongoing Evaluation)
+    │   │   └─ Prompt B (Production Evaluation)
+    │   └─ Language B
+    └─ Project B
+    ```
+
+- **Dashboards:**
+  - **Project Dashboard:** Displays overall statistics, session list, and summary charts.
+  - **Session Dashboard:** Lists language evaluations, model configuration summary, and API metrics.
+  - **Language Evaluation Workbench:**  
+    - Displays details from the source file (TextID, Source Text, Extra, Ground Truth).
+    - Shows the compiled prompt with substituted parameters (including style guide indexing).
+    - Presents the MT output.
+    - Displays computed BLEU and edit distance metrics.
+    - Provides input fields for human evaluation score and comment.
+    - Includes buttons to “Save,” “Update,” or “Submit Evaluation.”
+- **Prompt Management UI:**  
+  A dedicated view to list all prompt versions with filtering (active, historical), and options to create a new version, view change logs, and rollback.
+
+---
+
+## 7. Detailed Specification
+
+### Prompt Management Module
+
+- **Input:**  
+  A text prompt template with placeholders (e.g., `{target_language}`, `{source_to_translate}`, `{char_gender}`, etc.).
+- **Process:**  
+  1. User edits the prompt in the UI.
+  2. On activation, the system creates a new version entry in the `PromptVersions` table with an incremented version number and associated metadata.
+- **Output:**  
+  The active prompt version is flagged in the database and available for prompt compilation via API.
+
+### Evaluation Engine
+
+- **File Upload & Parsing:**  
+  1. PM uploads a source file (CSV/Excel) containing: TextID, Source Text, Extra, Historical Translation.
+  2. The backend parses the file, validates the data, and creates records in the `LanguageEvaluations` table.
+- **Prompt Compilation:**  
+  1. Retrieve the active prompt version.
+  2. Substitute parameters:
+     - **Direct Parameters:** Replace `{target_language}`, `{source_to_translate}`.
+     - **Indexed Parameters:** Extract character names from “Extra” and query the language-specific style guide for additional data (e.g., gender, occupation, tone). This component remains modular for future enhancements.
+  3. Store the compiled prompt in the evaluation record.
+- **MT API Call:**  
+  1. Make an automatic REST API call to the LLM/MT service using the compiled prompt.
+  2. Record model configuration and API call metrics (latency, cost) in the session record.
+  3. Save the MT output.
+- **Automated Metrics Calculation:**  
+  1. Compute the BLEU score by comparing the MT output with the ground truth.
+  2. Compute the edit distance (e.g., Levenshtein distance).
+  3. Save these metrics in the `LanguageEvaluations` record.
+
+### Workflow Automation & Asynchronous Updates
+
+- **Evaluator Interface:**  
+  1. Evaluators view the MT output in the workbench.
+  2. They enter human evaluation scores and comments.
+  3. Data is stored in the `EvaluationRecords` table.
+  4. The UI supports asynchronous updates via PUT requests.
+- **Dashboard Updates:**  
+  Implement periodic polling for MVP simplicity to refresh dashboard metrics.
+
+---
+
+## 8. Implementation Plan and Timeline
+
+### Phase 1: Project Setup and Initial Schema Design (Week 1–2)
+- **Task 1:** Set up the project repository and version control.
+- **Task 2:** Define and implement the SQLite database schema.
+- **Task 3:** Document the database schema and API requirements.
+
+### Phase 2: Backend API Development (Week 3–5)
+- **Task 4:** Choose a web framework (Flask is recommended for simplicity).
+- **Task 5:** Develop RESTful API endpoints (Projects, Sessions, Evaluations, Prompt Versions, MT API Logging).
+- **Task 6:** Implement file upload and parsing logic.
+- **Task 7:** Integrate the LLM/MT API call module with model configuration logging.
+- **Task 8:** Develop automated metric calculation functions (BLEU, edit distance) using standard libraries.
+
+### Phase 3: Frontend UI Development (Week 6–8)
+- **Task 9:** Set up a frontend framework (React is recommended).
+- **Task 10:** Design and implement the navigation panel (Projects → Sessions → Languages → Prompts) according to the hierarchical structure.
+- **Task 11:** Build dashboards (Project Dashboard, Session Dashboard, Language Evaluation Workbench).
+- **Task 12:** Implement the prompt management UI for versioning.
+
+### Phase 4: Integration and Testing (Week 9–10)
+- **Task 13:** Integrate the frontend with backend API endpoints.
+- **Task 14:** Conduct unit tests for API endpoints and database operations.
+- **Task 15:** Perform integration testing for the complete workflow:
+  - File upload → Prompt compilation → MT API call → Automated metric calculation → Human evaluation update.
+- **Task 16:** Gather internal feedback and conduct usability testing.
+
+### Phase 5: Deployment and Documentation (Week 11–12)
+- **Task 17:** Prepare deployment scripts (Docker is recommended for containerization).
+- **Task 18:** Write comprehensive documentation (user guide, API docs, developer instructions).
+- **Task 19:** Final review, bug fixes, and deploy to a test environment.
+- **Task 20:** Handoff documentation to internal teams.
+
+---
+
+## 9. Testing, Deployment, and Future Scalability
+
+- **Testing:**
+  - Unit tests for all API endpoints and backend functions.
+  - Integration tests covering the complete workflow.
+  - UI testing (manual and automated) for dashboard functionality.
+- **Deployment:**
+  - Containerize the application using Docker.
+  - Deploy on an internal server with HTTPS (if needed).
+- **Future Scalability:**
+  - Monitor performance and plan migration from SQLite to PostgreSQL if needed.
+  - Upgrade from periodic polling to real-time dashboards using WebSockets.
+  - Extend reporting features and analytics.
+  - Consider adding role-based access control in future iterations.
+
+---
+
+## 10. Risks, Dependencies, and Assumptions
+
+### Risks
+- **API Dependency:** Reliance on an external LLM/MT API; any downtime or API changes can affect functionality.
+- **Performance:** SQLite may become a bottleneck under heavy load; plan for migration if necessary.
+- **Data Quality:** File uploads must be validated to prevent errors in prompt compilation.
+
+### Dependencies
+- External LLM/MT API service.
+- Internet connectivity for API calls.
+- Chosen frontend and backend frameworks (Flask and React).
+
+### Assumptions
+- Internal teams are comfortable following provided usage instructions.
+- Style guide data is available and maintained externally.
+- Evaluators can work asynchronously with minimal training.
+
+---
+
+## 11. Optimizations for MVP
+
+- **UI Simplification:**  
+  Focus on essential dashboards (e.g., a single workbench view for language evaluations) while keeping the hierarchical navigation panel clear.
+  
+- **Database Consolidation:**  
+  Merge evaluation records if only one human evaluation per language is expected. Model configuration and API metrics can be stored as JSON in the Sessions table.
+
+- **Minimal API Endpoints:**  
+  Implement only core endpoints (create and fetch for projects, sessions, evaluations, and prompt versions). Full CRUD support can be added later.
+
+- **Modular Prompt Processing:**  
+  Retain style guide indexing as a separate, modular component to ensure clarity and future extensibility.
+
+- **Standard Libraries:**  
+  Use standard libraries for BLEU and edit distance calculations to keep code lean.
+
+- **Simple Asynchronous Updates:**  
+  Implement periodic polling for dashboard updates to reduce complexity.
+
+---
+
+## 12. Appendices and Glossary
+
+### Glossary
+- **BLEU Score:** An automatic evaluation metric for MT quality.
+- **Edit Distance:** A measure (typically Levenshtein distance) of similarity between two strings.
+- **LLM:** Large Language Model used for machine translation.
+- **MT Output:** The translation generated by the LLM/MT system.
+- **Prompt Versioning:** Managing changes to prompt templates with a version history.
+- **Style Guide:** Documentation that provides specific language parameters (e.g., character details) for prompt parameter substitution.
+
+### Appendices
+- **Appendix A:** Example source file format (CSV/Excel template).
+- **Appendix B:** Detailed API Endpoint Documentation (with JSON examples and error codes).
+- **Appendix C:** Sample Prompt Template with Parameter Placeholders.
+- **Appendix D:** User Instructions for Internal Teams.
+
+---
+
+## Final Notes
+
+This document serves as a comprehensive blueprint for the development of the Prompt Management and Evaluation Tool for MT. Each module, API endpoint, and UI component must be implemented with clear documentation and maintainable, modular code. Future enhancements may include real-time monitoring, advanced analytics, role-based access control, and migration to a more scalable database system.
+
+*End of Document*
