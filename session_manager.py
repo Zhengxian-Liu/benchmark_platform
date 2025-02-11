@@ -5,13 +5,14 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 def create_session(
-    db: Session, 
-    project_name: str, 
-    source_file_name: str, 
+    db: Session,
+    project_name: str,
+    source_file_name: str,
     source_file_path: str,
-    selected_languages: List[str]
+    selected_languages: List[str],
+    column_mappings: Dict[str, str]
 ) -> DbSession:
-    """Create a new session for a project with selected languages."""
+    """Create a new session for a project with selected languages and column mappings."""
     # Initialize session data with basic information
     session_data = {
         "selected_languages": selected_languages,
@@ -19,6 +20,7 @@ def create_session(
             "name": source_file_name,
             "path": source_file_path
         },
+        "column_mappings": column_mappings,
         "prompts": {lang: None for lang in selected_languages},
         "translations": {},
         "evaluations": {},
@@ -40,34 +42,58 @@ def create_session(
 def process_excel_file(
     db: Session,
     file_path: str
-) -> tuple[bool, str, List[str]]:
+) -> tuple[bool, str, List[str], Dict[str, str]]:
     """
-    Process an uploaded Excel file and extract language codes.
+    Process an uploaded Excel file and detect columns and language codes.
 
     Args:
         db: Database session
         file_path: Path to the uploaded Excel file
 
     Returns:
-        Tuple of (success: bool, message: str, language_codes: List[str])
+        Tuple of (success: bool, message: str, language_codes: List[str], column_mappings: Dict[str, str])
     """
     try:
         # Read Excel file
         df = pd.read_excel(file_path)
+        
+        # Detect potential column mappings
+        column_mappings = {}
+        all_columns = list(df.columns)
+        
+        # Detect Source column
+        source_candidates = {'source', 'text', 'content', 'original', 'src'}
+        source_col = next((col for col in all_columns if col.lower() in source_candidates), None)
+        if source_col:
+            column_mappings['source'] = source_col
+            
+        # Detect Extra column
+        extra_candidates = {'extra', 'additional', 'metadata', 'info', 'context'}
+        extra_col = next((col for col in all_columns if col.lower() in extra_candidates), None)
+        if extra_col:
+            column_mappings['extra'] = extra_col
+            
+        # Detect Text ID column
+        id_candidates = {'textid', 'id', 'text_id', 'index', 'key'}
+        id_col = next((col for col in all_columns if col.lower() in id_candidates), None)
+        if id_col:
+            column_mappings['textid'] = id_col
+
+        # Detect language codes from remaining columns
+        mapped_cols = set(column_mappings.values())
+        language_codes = [col for col in all_columns if col not in mapped_cols]
 
         # Validate required columns
-        required_columns = {'textid', 'source', 'extra'}
-        missing_columns = required_columns - set(df.columns)
-        if missing_columns:
-            return False, f"Missing required columns: {', '.join(missing_columns)}", []
+        if not column_mappings.get('source'):
+            return False, "Could not detect Source column. Please ensure a column for source text exists.", [], {}
+        if not column_mappings.get('textid'):
+            return False, "Could not detect Text ID column. Please ensure a column for text IDs exists.", [], {}
 
-        # Detect language codes from column names
-        language_codes = [col for col in df.columns if col not in required_columns]
-
-        return True, "Excel file processed successfully", language_codes
+        # Return success with detected mappings
+        return True, "Excel file processed successfully", language_codes, column_mappings
 
     except Exception as e:
-        return False, f"Error processing Excel file: {str(e)}", []
+        return False, f"Error processing Excel file: {str(e)}", [], {}
 
 def create_session_texts(
     db: Session,
@@ -88,6 +114,17 @@ def create_session_texts(
         Tuple of (success: bool, message: str)
     """
     try:
+        # Get session and column mappings
+        session = get_session(db, session_id)
+        if not session or 'column_mappings' not in session.data:
+            return False, "Session not found or missing column mappings"
+            
+        column_mappings = session.data['column_mappings']
+        
+        # Validate required mappings
+        if not all(key in column_mappings for key in ['textid', 'source']):
+            return False, "Missing required column mappings"
+            
         # Read Excel file
         df = pd.read_excel(file_path)
         
@@ -99,12 +136,17 @@ def create_session_texts(
                 if lang in df.columns:
                     ground_truth[lang] = row[lang] if pd.notna(row[lang]) else None
 
+            # Get values using column mappings
+            text_id = str(row[column_mappings['textid']])
+            source_text = row[column_mappings['source']]
+            extra_data = row[column_mappings.get('extra')] if 'extra' in column_mappings and pd.notna(row[column_mappings['extra']]) else None
+
             # Create SessionText entry
             text = SessionText(
                 session_id=session_id,
-                text_id=str(row['textid']),
-                source_text=row['source'],
-                extra_data=row['extra'] if pd.notna(row['extra']) else None,
+                text_id=text_id,
+                source_text=source_text,
+                extra_data=extra_data,
                 ground_truth=ground_truth
             )
             db.add(text)
@@ -129,8 +171,13 @@ def get_session(db: Session, session_id: int) -> Optional[DbSession]:
     return db.query(DbSession).filter(DbSession.id == session_id).first()
 
 def get_project_sessions(db: Session, project_name: str) -> List[DbSession]:
-    """Get all sessions for a project."""
-    return db.query(DbSession).filter(DbSession.project_name == project_name).all()
+    """Get all sessions for a project, ordered by creation date."""
+    return (
+        db.query(DbSession)
+        .filter(DbSession.project_name == project_name)
+        .order_by(DbSession.created_at.desc())
+        .all()
+    )
 
 def get_session_texts(db: Session, session_id: int, offset: int = 0, limit: int = 100) -> List[SessionText]:
     """Get a paginated list of texts for a session."""
