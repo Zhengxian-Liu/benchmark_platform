@@ -1,5 +1,5 @@
 import gradio as gr
-from fastapi import FastAPI, Request, Depends, UploadFile, File
+from fastapi import FastAPI, Request, Depends, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import models
@@ -56,6 +56,9 @@ def get_db():
 def create_gradio_interface():
     with gr.Blocks() as demo:
         gr.Markdown("# Prompt Benchmark Platform")
+
+        # Hidden state to store the current session ID
+        current_session_id = gr.State(None)
 
         with gr.Row():  # Main Row
             with gr.Column(scale=1):  # Left Column (Navigation)
@@ -225,14 +228,38 @@ def create_gradio_interface():
                 with gr.Tab("Session Management"):
                     with gr.Row():
                         excel_upload = gr.File(label="Upload Source Excel")
-                        create_session_btn = gr.Button("Create New Session", interactive=False)  # Initially disabled
+                        create_session_btn = gr.Button("Create New Session", interactive=False)
                     session_status = gr.Markdown(visible=False)
+                    
+                    # Column mapping components
+                    with gr.Row(visible=False) as column_mapping_row:
+                        with gr.Column():
+                            source_col = gr.Dropdown(
+                                label="Source Text Column",
+                                choices=[],
+                                interactive=True,
+                                info="Column containing the text to translate"
+                            )
+                        with gr.Column():
+                            textid_col = gr.Dropdown(
+                                label="Text ID Column",
+                                choices=[],
+                                interactive=True,
+                                info="Column containing unique text identifiers"
+                            )
+                        with gr.Column():
+                            extra_col = gr.Dropdown(
+                                label="Extra Data Column (Optional)",
+                                choices=[],
+                                interactive=True,
+                                info="Column containing additional context"
+                            )
                     
                     # Session preview components
                     excel_preview_display = gr.Dataframe(
                         label="Excel File Preview",
-                        headers=["textid", "source", "extra"],
-                        datatype=["str", "str", "str"],
+                        type="pandas",
+                        wrap=True,
                         visible=False
                     )
                     language_selection = gr.CheckboxGroup(
@@ -354,13 +381,14 @@ def create_gradio_interface():
                                 }
 
         # Event Handlers
-        def update_session_list(project_name):
+        def update_session_list(project_name, current_id):
             db = SessionLocal()
             try:
                 if not project_name:
                     return {
                         session_dropdown: gr.update(choices=[], value=None),
-                        project_status: gr.update(visible=False)
+                        project_status: gr.update(visible=False),
+                        current_session_id: None
                     }
 
                 sessions = get_project_sessions(db, project_name)
@@ -369,9 +397,20 @@ def create_gradio_interface():
                     for s in sessions
                 ]
 
+                # If we have a current session ID, try to select it in the dropdown
+                selected_value = None
+                if current_id:
+                    matching_choice = next(
+                        (choice for choice in choices if f"Session {current_id}" in choice),
+                        None
+                    )
+                    if matching_choice:
+                        selected_value = matching_choice
+
                 return {
-                    session_dropdown: gr.update(choices=choices, value=None),
-                    project_status: gr.update(value=f"Selected project: {project_name}", visible=True)
+                    session_dropdown: gr.update(choices=choices, value=selected_value),
+                    project_status: gr.update(value=f"Selected project: {project_name}", visible=True),
+                    current_session_id: current_id
                 }
             finally:
                 db.close()
@@ -384,6 +423,7 @@ def create_gradio_interface():
                         visible=True
                     ),
                     create_session_btn: gr.update(interactive=False),
+                    column_mapping_row: gr.update(visible=False),
                     excel_preview_display: gr.update(visible=False),
                     language_selection: gr.update(visible=False)
                 }
@@ -391,66 +431,86 @@ def create_gradio_interface():
             db = SessionLocal()
             try:
                 file_path = file.name
-                success, message, language_codes = process_excel_file(db, file_path)
+                success, message, language_codes, detected_mappings = process_excel_file(db, file_path)
                 
                 if not success:
                     return {
                         session_status: gr.update(value=f"❌ Error: {message}", visible=True),
                         create_session_btn: gr.update(interactive=False),
+                        column_mapping_row: gr.update(visible=False),
                         excel_preview_display: gr.update(visible=False),
                         language_selection: gr.update(visible=False)
                     }
 
-                # Display preview
+                # Display preview and setup column mapping
                 try:
-                    # Read Excel file preserving original column names
-                    raw_data = pd.read_excel(file_path, nrows=5, header=None)
-                    header_row = pd.read_excel(file_path, nrows=0)
-                    original_columns = header_row.columns.tolist()
+                    # Read Excel file and get preview
+                    df = pd.read_excel(file_path)
+                    preview_df = df.head()
+                    all_columns = df.columns.tolist()
                     
-                    # Create DataFrame with preserved column names
-                    df = pd.DataFrame(raw_data.values[1:], columns=original_columns)
+                    # Set detected mappings in dropdowns
+                    source_value = detected_mappings.get('source', None)
+                    textid_value = detected_mappings.get('textid', None)
+                    extra_value = detected_mappings.get('extra', None)
                     
-                    # Convert to list of lists for proper display
-                    excel_preview = [original_columns] + df.values.tolist()
+                    # Enable create button if required mappings are detected
+                    can_create = bool(source_value and textid_value)
+                    
+                    return {
+                        session_status: gr.update(
+                            value=f"✅ File uploaded. Detected languages: {', '.join(language_codes)}\nPlease verify column mappings.",
+                            visible=True
+                        ),
+                        column_mapping_row: gr.update(visible=True),
+                        source_col: gr.update(choices=all_columns, value=source_value),
+                        textid_col: gr.update(choices=all_columns, value=textid_value),
+                        extra_col: gr.update(choices=all_columns, value=extra_value),
+                        excel_preview_display: gr.update(
+                            value=preview_df,
+                            visible=True
+                        ),
+                        language_selection: gr.update(choices=language_codes, value=[], visible=True),
+                        create_session_btn: gr.update(interactive=can_create)
+                    }
                 except Exception as e:
                     return {
                         session_status: gr.update(value=f"❌ Error reading Excel: {str(e)}", visible=True),
                         create_session_btn: gr.update(interactive=False),
+                        column_mapping_row: gr.update(visible=False),
                         excel_preview_display: gr.update(visible=False),
                         language_selection: gr.update(visible=False)
                     }
-
-                return {
-                    session_status: gr.update(
-                        value=f"✅ File uploaded. Detected languages: {', '.join(language_codes)}",
-                        visible=True
-                    ),
-                    excel_preview_display: gr.update(value=excel_preview, visible=True),
-                    language_selection: gr.update(choices=language_codes, value=[], visible=True),
-                    create_session_btn: gr.update(interactive=False)
-                }
             finally:
                 db.close()
 
-        def create_session_handler(project_name, selected_languages, file):
-            if not project_name or not selected_languages or not file:
+        def create_session_handler(project_name, selected_languages, file, source_column, textid_column, extra_column):
+            if not all([project_name, selected_languages, file, source_column, textid_column]):
                 return {
                     session_status: gr.update(
-                        value="⚠️ Please select a project, upload a file, and select languages.",
+                        value="⚠️ Please select a project, upload a file, select languages, and map required columns.",
                         visible=True
                     )
                 }
 
             db = SessionLocal()
             try:
-                # Create new session with selected languages
+                # Create column mappings dict
+                column_mappings = {
+                    'source': source_column,
+                    'textid': textid_column
+                }
+                if extra_column:
+                    column_mappings['extra'] = extra_column
+
+                # Create new session with selected languages and mappings
                 session = create_session(
-                    db, 
-                    project_name, 
-                    file.name, 
+                    db,
+                    project_name,
                     file.name,
-                    selected_languages
+                    file.name,
+                    selected_languages,
+                    column_mappings
                 )
 
                 # Create session texts and languages
@@ -474,71 +534,45 @@ def create_gradio_interface():
                     for s in sessions
                 ]
 
-                # Collect all components that need to be updated
-                components_to_update = []
-                updates = []
-                
-                # Add basic UI components
-                components_to_update.extend([
-                    session_status,
-                    session_info,
-                    session_dropdown,
-                    excel_preview_display,
-                    language_selection,
-                    navigation_content  # Add navigation to components list
-                ])
-                
-                # Add language-specific components
-                for lang in supported_languages:
-                    # Prompt components
-                    components_to_update.extend([
-                        language_prompts[lang]["prompt_text"],
-                        language_prompts[lang]["version_history"],
-                        language_prompts[lang]["prompt_version_dropdown"],
-                        language_prompts[lang]["save_status"]
-                    ])
-                    
-                    # Translation components
-                    components_to_update.extend([
-                        language_translations[lang]["current_prompt"],
-                        language_translations[lang]["source_display"],
-                        language_translations[lang]["evaluation_status"]
-                    ])
-                # Create list of updates matching components order
-                updates = [
-                    gr.update(value="✅ Session created successfully", visible=True),  # session_status
-                    gr.update(value=session_data, headers=["Session ID", "Created At", "Status", "Progress"]),  # session_info
-                    gr.update(choices=[f"Session {s.id} ({s.created_at.strftime('%Y-%m-%d %H:%M')})"
-                                      for s in sessions]),  # session_dropdown
-                    gr.update(visible=False),  # excel_preview_display
-                    gr.update(visible=False),  # language_selection
-                    gr.update(value=generate_navigation_html())  # Update navigation panel
-                ]
-                
-                # Add language-specific updates
+                # Create base update dict with common components
+                updates = {
+                    session_status: gr.update(value="✅ Session created successfully", visible=True),
+                    session_info: gr.update(value=session_data, headers=["Session ID", "Created At", "Status", "Progress"]),
+                    session_dropdown: gr.update(choices=[f"Session {s.id} ({s.created_at.strftime('%Y-%m-%d %H:%M')})"
+                                          for s in sessions],
+                                 value=f"Session {session.id} ({session.created_at.strftime('%Y-%m-%d %H:%M')})"
+                    ),
+                    excel_preview_display: gr.update(visible=False),
+                    language_selection: gr.update(visible=False),
+                    column_mapping_row: gr.update(visible=False),
+                    navigation_content: gr.update(value=generate_navigation_html()),
+                    current_session_id: session.id
+                }
+
+                # Add language-specific component updates
                 for lang in supported_languages:
                     is_selected = lang in selected_languages
-                    
-                    # Prompt component updates
-                    updates.append(gr.update(value="", visible=is_selected))  # prompt_text
-                    updates.append(gr.update(
+
+                    # Prompt components
+                    updates[language_prompts[lang]["prompt_text"]] = gr.update(value="", visible=is_selected)
+                    updates[language_prompts[lang]["version_history"]] = gr.update(
                         value=[],
                         headers=["Version", "Timestamp", "Changes"],
                         visible=is_selected
-                    ))  # version_history
-                    updates.append(gr.update(choices=[], visible=is_selected))  # prompt_version_dropdown
-                    updates.append(gr.update(visible=is_selected))  # save_status
-                    
-                    # Translation component updates
-                    updates.append(gr.update(value="No prompt saved yet", visible=is_selected))  # current_prompt
-                    updates.append(gr.update(
+                    )
+                    updates[language_prompts[lang]["prompt_version_dropdown"]] = gr.update(choices=[], visible=is_selected)
+                    updates[language_prompts[lang]["save_status"]] = gr.update(visible=is_selected)
+
+                    # Translation components
+                    updates[language_translations[lang]["current_prompt"]] = gr.update(value="No prompt saved yet", visible=is_selected)
+                    updates[language_translations[lang]["source_display"]] = gr.update(
                         value=[],
                         headers=["Text ID", "Source Text", "Extra Data", f"{lang} Ground Truth", f"{lang} Translation", "Details"],
                         visible=is_selected
-                    ))  # source_display
-                    updates.append(gr.update(visible=is_selected))  # evaluation_status
-                
-                return dict(zip(components_to_update, updates))
+                    )
+                    updates[language_translations[lang]["evaluation_status"]] = gr.update(visible=is_selected)
+
+                return updates
 
             except Exception as e:
                 return {
@@ -1020,6 +1054,177 @@ def create_gradio_interface():
             view_style_guide,
             inputs=[style_guide_project, style_guide_language, style_guide_version_dropdown],
             outputs=[style_guide_status, view_style_guide_preview]
+        )
+
+        def handle_session_selection(session_info_str):
+            """Update current_session_id when a session is selected"""
+            if not session_info_str:
+                return {"current_session_id": None}
+            try:
+                session_id = int(session_info_str.split(" ")[1])
+                return {"current_session_id": session_id}
+            except (ValueError, IndexError):
+                return {"current_session_id": None}
+
+        # Register session selection handler
+        session_dropdown.change(
+            handle_session_selection,
+            inputs=[session_dropdown],
+            outputs=[current_session_id]
+        )
+
+        # Register project selection handler with current_session_id
+        project_dropdown.change(
+            update_session_list,
+            inputs=[project_dropdown, current_session_id],
+            outputs=[session_dropdown, project_status, current_session_id]
+        )
+
+        # Register excel upload handler
+        excel_upload.upload(
+            handle_excel_upload,
+            inputs=[excel_upload, project_dropdown],
+            outputs=[
+                session_status,
+                create_session_btn,
+                column_mapping_row,
+                source_col,
+                textid_col,
+                extra_col,
+                excel_preview_display,
+                language_selection
+            ]
+        )
+
+        # Register session creation handler with column mappings
+        create_session_btn.click(
+            create_session_handler,
+            inputs=[
+                project_dropdown,
+                language_selection,
+                excel_upload,
+                source_col,
+                textid_col,
+                extra_col
+            ],
+            outputs=[
+                session_status,
+                session_info,
+                session_dropdown,
+                excel_preview_display,
+                language_selection,
+                column_mapping_row,
+                navigation_content,
+                current_session_id,
+                *[comp for lang in supported_languages for comp in [
+                    language_prompts[lang]["prompt_text"],
+                    language_prompts[lang]["version_history"],
+                    language_prompts[lang]["prompt_version_dropdown"],
+                    language_prompts[lang]["save_status"],
+                    language_translations[lang]["current_prompt"],
+                    language_translations[lang]["source_display"],
+                    language_translations[lang]["evaluation_status"]
+                ]]
+            ]
+        )
+
+        def reload_session_state():
+            """Load the initial session state"""
+            db = SessionLocal()
+            try:
+                # Get most recent session from database
+                latest_session = db.query(models.Session).order_by(models.Session.created_at.desc()).first()
+                
+                # Create base update dict with default values
+                updates = {
+                    project_dropdown: gr.update(value=None),
+                    session_dropdown: gr.update(choices=[], value=None),
+                    session_info: gr.update(value=[]),
+                    project_status: gr.update(visible=False),
+                    current_session_id: None
+                }
+                
+                # Add language-specific component updates with default values
+                for lang in supported_languages:
+                    # Prompt components
+                    updates[language_prompts[lang]["prompt_text"]] = gr.update(value="", visible=False)
+                    updates[language_prompts[lang]["version_history"]] = gr.update(
+                        value=[],
+                        headers=["Version", "Timestamp", "Changes"],
+                        visible=False
+                    )
+                    updates[language_prompts[lang]["prompt_version_dropdown"]] = gr.update(choices=[], visible=False)
+                    updates[language_prompts[lang]["save_status"]] = gr.update(visible=False)
+
+                    # Translation components
+                    updates[language_translations[lang]["current_prompt"]] = gr.update(value="No prompt saved yet", visible=False)
+                    updates[language_translations[lang]["source_display"]] = gr.update(
+                        value=[],
+                        headers=["Text ID", "Source Text", "Extra Data", f"{lang} Ground Truth", f"{lang} Translation", "Details"],
+                        visible=False
+                    )
+                    updates[language_translations[lang]["evaluation_status"]] = gr.update(visible=False)
+
+                if latest_session:
+                    # Get all sessions for this project
+                    sessions = get_project_sessions(db, latest_session.project_name)
+                    session_data = [
+                        [s.id, s.created_at.strftime("%Y-%m-%d %H:%M"), s.status,
+                         f"{get_session_progress(db, s.id)['evaluated']}/{get_session_progress(db, s.id)['total']} texts"]
+                        for s in sessions
+                    ]
+
+                    # Update with session state
+                    updates.update({
+                        project_dropdown: gr.update(value=latest_session.project_name),
+                        session_dropdown: gr.update(
+                            choices=[f"Session {s.id} ({s.created_at.strftime('%Y-%m-%d %H:%M')})" for s in sessions],
+                            value=f"Session {latest_session.id} ({latest_session.created_at.strftime('%Y-%m-%d %H:%M')})"
+                        ),
+                        session_info: gr.update(value=session_data),
+                        project_status: gr.update(value=f"Selected project: {latest_session.project_name}", visible=True),
+                        current_session_id: latest_session.id
+                    })
+
+                    # Update language components based on session languages
+                    if latest_session.data and 'selected_languages' in latest_session.data:
+                        selected_languages = latest_session.data['selected_languages']
+                        for lang in supported_languages:
+                            is_selected = lang in selected_languages
+                            # Update prompt components visibility
+                            updates[language_prompts[lang]["prompt_text"]] = gr.update(visible=is_selected)
+                            updates[language_prompts[lang]["version_history"]] = gr.update(visible=is_selected)
+                            updates[language_prompts[lang]["prompt_version_dropdown"]] = gr.update(visible=is_selected)
+                            updates[language_prompts[lang]["save_status"]] = gr.update(visible=is_selected)
+
+                            # Update translation components visibility
+                            updates[language_translations[lang]["current_prompt"]] = gr.update(visible=is_selected)
+                            updates[language_translations[lang]["source_display"]] = gr.update(visible=is_selected)
+                            updates[language_translations[lang]["evaluation_status"]] = gr.update(visible=is_selected)
+
+                return updates
+            finally:
+                db.close()
+
+        # Load initial state on page load
+        demo.load(
+            reload_session_state,
+            outputs=[
+                project_dropdown,
+                session_dropdown,
+                session_info,
+                project_status,
+                current_session_id,
+                *[comp for lang in supported_languages for comp in [
+                    language_prompts[lang]["prompt_text"],
+                    language_prompts[lang]["version_history"],
+                    language_prompts[lang]["prompt_version_dropdown"],
+                    language_prompts[lang]["save_status"],
+                    language_translations[lang]["current_prompt"],
+                    language_translations[lang]["source_display"],
+                    language_translations[lang]["evaluation_status"]
+                ]]
+            ]
         )
 
         return demo
