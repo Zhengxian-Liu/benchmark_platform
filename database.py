@@ -1,22 +1,47 @@
-from sqlalchemy import create_engine, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+"""Database configuration."""
 
-SQLALCHEMY_DATABASE_URL = "postgresql://user:password@localhost/prompt_benchmark"
+import logging
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session
+from typing import Generator
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    connect_args={"check_same_thread": False}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-def init_db():
-    """Drop all tables and recreate them."""
-    # Create a connection
-    with engine.connect() as conn:
-        # Drop and recreate schema to reset everything
-        conn.execute(text("DROP SCHEMA public CASCADE"))
-        conn.execute(text("CREATE SCHEMA public"))
-        conn.commit()
+def get_db() -> Generator[Session, None, None]:
+    """Get a database session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-    # Create all tables
+def init_db() -> None:
+    """Initialize the database."""
+    from models import (
+        Session, SessionLanguage, SessionText,
+        Translation, EvaluationResult, StyleGuide
+    )
+    logging.info("Creating initial database schema...")
     Base.metadata.create_all(bind=engine)
+    logging.info("Database schema created successfully")
+
+def reset_db() -> None:
+    """Drop and recreate all tables."""
+    from models import (  # Import here to avoid circular imports
+        Session, SessionLanguage, SessionText,
+        Translation, EvaluationResult, StyleGuide
+    )
+    logging.info("Dropping all tables...")
+    Base.metadata.drop_all(bind=engine)
+    logging.info("Creating all tables...")
+    Base.metadata.create_all(bind=engine)
+    logging.info("Database reset complete")
